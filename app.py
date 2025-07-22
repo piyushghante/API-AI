@@ -1,34 +1,51 @@
 from flask import Flask, request, jsonify
 import google.generativeai as genai
 import requests
-import os
+import random
 
 # ==========================
-# 1. Configure Gemini
+# 1. Configure Gemini API Keys
 # ==========================
-genai.configure(api_key="AIzaSyC0KJrJhZ5V0Ug2-rqejMjnVdnQ13ozfjs")  # Replace with your Gemini API key
-model = genai.GenerativeModel("gemini-1.5-flash")
+GEMINI_API_KEYS = [
+    "AIzaSyBDPhRKMHAalaL1EQCho9jADjon9tqHa9s",
+    "AIzaSyCxP5EUH3-Unve35MufRUJNWyMx5_0Nry4",
+    "AIzaSyDjgx3i_6e714ZE-O2wpJNOK2Gry_XYOac",
+   
+]
 
 # ==========================
-# 2. Flask app setup
+# 2. Get Model with Shuffled API Key
+# ==========================
+def get_model_with_key_rotation():
+    random.shuffle(GEMINI_API_KEYS)
+    for key in GEMINI_API_KEYS:
+        try:
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            return model
+        except Exception as e:
+            print(f"Key failed: {key} | Error: {e}")
+    raise Exception("All API keys failed or quota exhausted.")
+
+# ==========================
+# 3. Flask App Setup
 # ==========================
 app = Flask(__name__)
-sessions = {}  # session_id -> conversation and user data
+sessions = {}  # session_id -> conversation history + form
 
 # ==========================
-# 3. Gemini Call Handler
+# 4. Gemini Chat Function
 # ==========================
 def call_gemini(messages):
+    model = get_model_with_key_rotation()
     chat = model.start_chat()
     for msg in messages:
         if msg["role"] == "user":
             chat.send_message(msg["content"])
-        elif msg["role"] == "system":
-            pass  # You can prepend this to context if needed
     return chat.last.text
 
 # ==========================
-# 4. Chat Endpoint
+# 5. Chat Endpoint
 # ==========================
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -47,23 +64,26 @@ def chat():
     history = state["history"]
     form = state["form"]
 
-    # Append new user message
+    # Add user message to history
     history.append({"role": "user", "content": user_message})
 
-    # Prompt for Gemini
+    # Prompt
     system_prompt = (
         "You are a helpful assistant for booking appointments. "
         "Your job is to gather the user's name, appointment date/time, and purpose. "
         "Ask step by step if any info is missing. Once all is collected, say you're booking."
     )
-    messages = [{"role": "system", "content": system_prompt}]
-    messages.extend(history[-5:])  # Limit context for speed
+    messages = [{"role": "system", "content": system_prompt}] + history[-5:]
 
     # Call Gemini
-    assistant_reply = call_gemini(messages)
+    try:
+        assistant_reply = call_gemini(messages)
+    except Exception as e:
+        return jsonify({"reply": f"❌ Error: {str(e)}", "done": True})
+
     history.append({"role": "assistant", "content": assistant_reply})
 
-    # Very basic logic to extract fields (for demo only)
+    # Basic field detection
     if not form["name"] and "name" in user_message.lower():
         form["name"] = user_message.strip().split()[-1]
     if not form["datetime"] and any(c in user_message for c in [":", "-", "/"]):
@@ -71,7 +91,7 @@ def chat():
     if not form["purpose"] and "purpose" in user_message.lower():
         form["purpose"] = user_message.strip().split()[-1]
 
-    # If all data collected, call mock API
+    # If form is complete
     if all(form.values()):
         try:
             payload = {
@@ -79,23 +99,24 @@ def chat():
                 "datetime": form["datetime"],
                 "purpose": form["purpose"],
             }
-            # Fake booking API (mock)
-            api_response = requests.post("https://jsonplaceholder.typicode.com/posts", json=payload)
+            # Fake booking API
+            response = requests.post("https://jsonplaceholder.typicode.com/posts", json=payload)
             return jsonify({
                 "reply": f"✅ Appointment booked successfully for {form['name']} on {form['datetime']} for {form['purpose']}.",
                 "done": True
             })
         except Exception as e:
-            return jsonify({"reply": f"❌ Error while booking: {str(e)}", "done": True})
+            return jsonify({"reply": f"❌ Booking failed: {str(e)}", "done": True})
 
-    # Return next assistant reply
+    # Otherwise continue conversation
     return jsonify({"reply": assistant_reply, "done": False})
 
 # ==========================
-# 5. Run Server
+# 6. Run the Server
 # ==========================
 # if __name__ == '__main__':
 #     app.run(debug=True)
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
